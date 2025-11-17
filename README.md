@@ -20,5 +20,5 @@ Simulation scripts:
 - Add delay to an ongoing simulation
 - Run a series of differnet delays and execute simualtion for each value automatically
 
-**Simulation output analysis: **
+Simulation output analysis:
 - Compare CBTC vs conventional with different delays. Evaluate average delay, delay across station, time space diagrams, Time to Recovery.
