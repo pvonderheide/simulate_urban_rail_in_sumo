@@ -1,14 +1,43 @@
-
-
 import marimo
 
-__generated_with = "0.13.2"
+__generated_with = "0.17.0"
 app = marimo.App(width="medium")
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md("""# Generate a SUMO Scenario with OSM data for a rail relation""")
+    mo.md("""# Generate a SUMO Scenario with OSM data for railways""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+    created by Paula von der Heide, TUBS, 2025
+
+    If you use this code in your research or publications, please cite: "A SUMO-based study pf Urban Rail Operations on Frankfurts Corridor A", Paula von der Heide und Prof. Dr.-Ing. Lars Schnieder, 5.th International Railway Symposium Aachen, 2025
+
+    not for commercial use
+    """
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+    - This script creates a SUMO simulation for one or more railway line(s) which are identified via their OSM relation ID
+    - All needed files for SUMO are created and extended to fit a railway simulation
+    """
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""## setup environment""")
     return
 
 
@@ -26,19 +55,43 @@ def _():
     from datetime import datetime
     import xml.etree.ElementTree as ET
     import sumolib
-    return ET, datetime, mo, os, requests, shutil, sumolib
+    from dotenv import find_dotenv, load_dotenv, find_dotenv
+    return (
+        ET,
+        datetime,
+        find_dotenv,
+        load_dotenv,
+        mo,
+        os,
+        requests,
+        shutil,
+        sumolib,
+    )
+
+
+@app.cell
+def _(find_dotenv, load_dotenv, os):
+    # find my dotenv file
+    notebook_dir = os.path.dirname(os.path.realpath(__file__))
+    os.chdir(notebook_dir)
+
+    dotenv_path = find_dotenv(usecwd=True)  # <- important
+    load_dotenv(dotenv_path, override=True) # override true otherwise once loaded variables will never update
+
+    dotenv_path
+    return
 
 
 @app.cell
 def _(os):
-    #directory in which SUMO files are created
-    dir = os.getcwd()
-    #dir = r"Enteryourpath"
+    #directory in which SUMO files are to be created
+    dir= dir = os.getenv("target_directory")
 
     # path to GUI view.xml file
-    GUI_settings_file = os.getcwd()+r"\view.xml"
-    #GUI_settings_file =r"Enteryourpath"
-    return GUI_settings_file, dir
+    GUI_settings_file = os.getenv("GUI_settings_file_path")
+
+    gtfszip = os.getenv("gtfs_zip")
+    return GUI_settings_file, dir, gtfszip
 
 
 @app.cell(hide_code=True)
@@ -115,9 +168,9 @@ def _(mo):
 def _(mo):
     mo.md(
         """
-        Simulation of an urban railway line(s)
-        Download topology information and all available additional information from OSM. Identify via **Relation ID**:
-        """
+    Simulation of an urban railway line(s)
+    Download topology information and all available additional information from OSM. Identify via **Relation ID**:
+    """
     )
     return
 
@@ -130,20 +183,13 @@ def _():
         {"city": "Frankfurt", "line":"U4", "relationid": "66630,939237"},
         {"city": "Frankfurt", "line":"ALL", "relationid": "66638, 939218, 66639, 939199, 66615, 939219, 939116, 939117, 939150, 939151, 66630, 939237, 66631, 939239, 66633, 939254, 939255, 66632"},
         {"city": "Hamburg", "line":"U4", "relationid": "2872789, 2872790"},
+        {"city":"Frankfurt", "line": "U3", "relationid": "66615,939219"}
     ]
     return (osm_relations,)
 
 
 @app.cell
 def _(mo, osm_relations):
-    # Inputs for the new entry
-    #city_input = mo.ui.text(label="City")
-    #line_input = mo.ui.text(label="Line")
-    #relationid_input = mo.ui.text(label="Relation ID (comma-separated)")
-
-    # Button to add the entry
-    #add_button = mo.ui.button(label="Add Entry")
-
     # Table display
     table = mo.ui.table(data =osm_relations)
     return (table,)
@@ -166,12 +212,133 @@ def _(table):
 
     # Convert to sorted list and join without quotes
     relID_str= ",".join(sorted(relID))
-    return relID, relID_str
+    return (relID_str,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""Query data via **Overpass API**, download as xml and save to file -_->scenario.osm_""")
+    return
+
+
+@app.cell
+def _():
+    overpass_FrankfurtALL ="""
+
+    [out:xml][timeout:600];
+
+    /* 1) Passenger route relations (incl. U7 east) */
+    relation(id:66638,939218,66639,939199,66615,
+             939219,939116,939117,939150,939151,
+             66630,939237,66631,939239,66633,939254,939255,66632,
+             2872789,2872790)
+             ->.routes;
+
+    /* 2) Expand all members (ways + their nodes) */
+    ( .routes; >>; ) -> .relmem_raw;
+
+    /* 3) Trim to wide corridor (covers Hohemark ↔ Enkheim & workshops)
+          lat: 50.08..50.27 ; lon: 8.52..8.85 */
+    (
+      node.relmem_raw(50.08,8.52,50.27,8.85);
+      way.relmem_raw(50.08,8.52,50.27,8.85);
+    ) -> .relmem;
+
+    /* 4) Main-line seed (for proximity queries) */
+    way.relmem
+      ["railway"~"^(light_rail|subway)$"]
+      ["operator"="VGF"]
+      -> .main;
+
+    /* 5) Operational tracks near the main line (strict VGF) */
+    way(around.main:200)(50.08,8.52,50.27,8.85)
+      ["railway"~"^(light_rail|subway)$"]
+      ["service"~"^(crossover|siding|yard)$"]
+      ["operator"="VGF"]
+      -> .ops;
+
+    /* 6) Enkheim pocket (back-of-station) */
+    node.relmem_raw["name"~"Enkheim"] -> .enkheim_pts;
+    way(around.enkheim_pts:350)
+      ["railway"~"^(light_rail|subway)$"]
+      ["operator"="VGF"]
+      -> .enkheim_yard;
+
+    /* 7) Bockenheimer Warte capture (allow missing operator locally) */
+    node.relmem_raw["name"~"Bockenheimer Warte"] -> .bw_pts;
+    way(around.bw_pts:300)
+      ["railway"~"^(light_rail|subway)$"]
+      ["operator"~"^vgf$",i] -> .bw_tracks_strict;
+    way(around.bw_pts:300)
+      ["railway"~"^(light_rail|subway)$"]
+      ["operator"!~"."] -> .bw_tracks_unop;
+    (.bw_tracks_strict; .bw_tracks_unop;) -> .bw_tracks;
+
+    /* 8) Explicit inclusion (your missing element) */
+    way(id:1238346189) -> .manual;
+
+    /* 9) Stadtbahnzentralwerkstatt capture (east of Heerstraße) */
+    (
+      node(50.08,8.52,50.27,8.85)["name"~"Stadtbahnzentralwerkstatt"];
+      way (50.08,8.52,50.27,8.85)["name"~"Stadtbahnzentralwerkstatt"];
+      relation(50.08,8.52,50.27,8.85)["name"~"Stadtbahnzentralwerkstatt"];
+    ) -> .szw_named;
+
+    way(around.szw_named:600)
+      ["railway"~"^(rail|light_rail|subway)$"]
+      ["operator"~"^vgf$",i] -> .szw_tracks_strict;
+
+    way(around.szw_named:600)
+      ["railway"~"^(rail|light_rail|subway)$"]
+      ["operator"!~"."] -> .szw_tracks_unop;
+
+    (.szw_tracks_strict; .szw_tracks_unop;) -> .szw_tracks;
+
+    /* 10) Heerstraße helper bubble (yard links near the junction) */
+    node.relmem_raw["name"~"Heerstraße"] -> .heer_pts;
+    way(around.heer_pts:500)
+      ["railway"~"^(rail|light_rail|subway)$"]
+      ["service"~"^(crossover|siding|yard)$"]
+      (50.08,8.52,50.27,8.85)
+      -> .heer_ops_all;
+    way.heer_ops_all["operator"~"^vgf$",i] -> .heer_ops_vgf;
+    way.heer_ops_all["operator"!~"."]      -> .heer_ops_unop;
+    (.heer_ops_vgf; .heer_ops_unop;) -> .heer_ops;
+
+    /* 11) Hohemark terminus capture (grab both tracks; allow missing operator) */
+    (
+      node.relmem_raw["name"~"Hohemark"];
+      way .relmem["name"~"Hohemark"];
+      relation.relmem_raw["name"~"Hohemark"];
+    ) -> .hoh_named;
+
+    way(around.hoh_named:450)
+      ["railway"~"^(rail|light_rail|subway)$"]
+      ["operator"~"^vgf$",i] -> .hoh_strict;
+
+    way(around.hoh_named:450)
+      ["railway"~"^(rail|light_rail|subway)$"]
+      ["operator"!~"."] -> .hoh_unop;
+
+    (.hoh_strict; .hoh_unop;) -> .hoh_tracks;
+
+    /* 12) Assemble and output (verbose geometry like your working query) */
+    (
+      .relmem;
+      .ops;
+      .enkheim_yard;
+      .bw_tracks;
+      .manual;
+      .szw_tracks;
+      .heer_ops;
+      .hoh_tracks;
+    ) -> .all;
+
+    (.all; >;);
+    out geom;
+
+
+    """
     return
 
 
@@ -193,7 +360,9 @@ def _(requests):
 def _(download_rel_from_osm):
     def create_osm_file(relID, osm_file, path):
 
-        _overpass_string = f"""[out:xml][timeout:25]; rel(id:{relID}); (._;>>;); out;"""
+        _overpass_string = f"""[out:xml][timeout:25]; rel(id:{relID}); (._;>>;); out;""" # use RelIDs
+        #_overpass_string = overpass_FrankfurtAsouth
+        #_overpass_string = overpass_FrankfurtALL
 
         _x = download_rel_from_osm(_overpass_string)
         print(_overpass_string)
@@ -209,8 +378,8 @@ def _(download_rel_from_osm):
 @app.cell
 def _(mo):
     trainstop_length = mo.ui.dropdown(
-        options=["110", "200", "500"],
-        value="110",  # default selected value
+        options=["50","100", "200", "500"],
+        value="100",  # default selected value
         label="Set default train stop length [m]",
         allow_select_none= False
     )
@@ -222,12 +391,12 @@ def _(mo):
 def _(mo):
     mo.md(
         """
-        **convert osm file to SUMO-network**
+    **convert osm file to SUMO-network**
 
-        - extract topology --> _.net.xml_
-        - extract stops --> _trainStops.add.xml_
-        - extract public transport lines (which lines stops at which stop) --> _ptlines.add.xml_
-        """
+    - extract topology --> _.net.xml_
+    - extract stops --> _trainStops.add.xml_
+    - extract public transport lines (which lines stops at which stop) --> _ptlines.add.xml_
+    """
     )
     return
 
@@ -246,7 +415,10 @@ def _(net_file, os, osm_file, scenario, stop_file, trainstop_length):
                               +" --railway.signal.guess.by-stops true"
                               +" --osm.stop-output.length.train " + trainstop_length.value
                               +" --osm.railsignals ALL"
-                              +" --railway.topology.output " +scenario+"_railrepair.xml")
+                              +" --railway.topology.output " +scenario+"_railrepair.xml"
+                              +" --geometry.remove true"#replace nodes which only define geometry points
+                              +" --remove-edges.isolated true" # remove not connected edges
+                 ) 
 
         print("Created "+net_file)
         print("Created "+stop_file)
@@ -304,6 +476,7 @@ def _(ET):
 
 @app.cell
 def _(ET, sumolib):
+    # add distance along corridor for one route
     def add_distance_along_route(input_net: str,
                                  input_routes: str,
                                  output_net: str,
@@ -367,6 +540,7 @@ def _(ET, sumolib):
 
 @app.cell
 def _(ET, sumolib):
+    # add distance along all routes in the network - careful, there will be some mismatch if lines converge. Distance of last added route will have its distance value!
     def add_distance_for_all_routes(input_net: str,
                                input_routes: str,
                                output_net: str,
@@ -491,12 +665,12 @@ def _(gtfsfile_browser, traffic_generation):
 
 
 @app.cell
-def _(gtfsfile_browser, os, scenario):
+def _(gtfszip, os, scenario):
     #read schedule from GTFS download and create vehicles and stations according to it
     def create_veh_from_gtfs():
         #Fahrplan von GTFS lesen und einspielen
-    
-        gtfszip = str(gtfsfile_browser.path(index=0))  # returns a Path object
+
+        #gtfszip = str(gtfsfile_browser.path(index=0))  # returns a Path object
     
         os.system('python "C:\\Program Files (x86)\\Eclipse\\Sumo\\tools\\import\\gtfs\\gtfs2pt.py" --network '+scenario+'.net.xml --gtfs "' + gtfszip + '" --date 20250204 --osm-routes '+scenario+'_ptlines.add.xml --modes subway')
 
@@ -508,8 +682,14 @@ def _(gtfsfile_browser, os, scenario):
 
 
 @app.cell
-def _():
-    ## vehicles
+def _(gtfsfile_browser):
+    gtfsfile_browser.path(index=0)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""## vehicles""")
     return
 
 
@@ -670,9 +850,20 @@ def _(conf_file, delay, prefix_output):
                 <fcd-output.acceleration value="true" type="BOOL" help="Add acceleration to the FCD output"/>
 
                 <railsignal-block-output value="{prefix_output}_Railsignal-blocks.xml" type="FILE" help="Save railsignal-blocks into FILE"/>
-        <railsignal-vehicle-output value="{prefix_output}_Railsignal-block-occ.xml" type="FILE" help="Occupancy information"/>
+                <railsignal-vehicle-output value="{prefix_output}_Railsignal-block-occ.xml" type="FILE" help="Occupancy information"/>
+
+            	<stop-output value="{prefix_output}_stop-output.xml" type="FILE" help="Record stops and loading/unloading of passenger and containers for all vehicles into FILE"/>   
+
+                <statistic-output value="{prefix_output}_statsout.xml"/>
 
             </output>
+
+        	<processing>
+        		<time-to-teleport value="-1" type="TIME" help="Specify how long a vehicle may wait until being teleported, defaults to 300, non-positive values disable teleporting"/>
+        		<time-to-teleport.railsignal-deadlock value="-1" type="TIME" help="The waiting time after which vehicles in a rail-signal based deadlock are teleported"/>
+        	</processing>
+
+
 
         	<configuration>
                 <gui-settings-file value="view.xml"/>
@@ -690,23 +881,14 @@ def _(conf_file, delay, prefix_output):
 
 
 @app.cell(hide_code=True)
-def _():
-    ## Run scenario generation
+def _(mo):
+    mo.md(r"""## Run scenario generation""")
     return
 
 
 @app.cell
-def _(mo):
-    button = mo.ui.run_button(
-        label="Create scenario",
-    )
-    button
-    return (button,)
-
-
-@app.cell
-def _(button, create_scenario):
-    create_scenario () if button.value else "Click the Create Scenario button!"
+def _(create_scenario):
+    create_scenario()
     return
 
 
@@ -727,7 +909,6 @@ def _(
     os,
     osm_file,
     rail_poi_file,
-    relID,
     relID_str,
     remove_vtype_entries,
     replace_type_attribute,
@@ -750,7 +931,7 @@ def _(
         #-------------------TOPOLOGY ------------------------------
         #download osm file
         create_osm_file(relID_str, osm_file, _path)
-        mo.output.append(f"OSM-File for downloaded relations {relID}: {osm_file}")
+        #mo.output.append(f"OSM-File for downloaded relations {relID}: {osm_file}")
 
         #convert to SUMO network
         run_netconvert()
@@ -800,12 +981,6 @@ def _(
 
         #-------------------NACHBEARBEITUNG ------------------------------  
 
-        #Not working. Still has bus stops in it. Just a prettiness issue. 
-        #convert bus stops to train stops and save in the same file (wrong key set by netconvert script)
-        #convert_bus_stops_to_train_stops(stop_file)
-        #convert_bus_stops_to_train_stops(ptlines_file)
-        #convert_bus_stops_to_train_stops(rt_file)
-
         add_distance_for_all_routes(
             input_net= net_file,
             input_routes= rt_file,
@@ -827,7 +1002,7 @@ def _(
         write_config(net_file, route_files_string, add_files_string)
         mo.output.append(f"Created SUMO config file:{conf_file}")
 
-        # go back to parent directory if creating another scenario
+        # go back to parent directory if creating another scenario / reuse this script
         parent = os.path.join(os.getcwd(), os.pardir)
         os.chdir(parent)
     return (create_scenario,)
